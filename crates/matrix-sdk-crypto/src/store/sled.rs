@@ -36,7 +36,7 @@ use uuid::Uuid;
 
 use super::{
     caches::SessionStore, Changes, CryptoStore, CryptoStoreError, InboundGroupSession, PickleKey,
-    ReadOnlyAccount, Result, Session,
+    ReadOnlyAccount, Result, RoomKeyCount, Session,
 };
 use crate::{
     gossiping::{GossipRequest, SecretInfo},
@@ -655,6 +655,14 @@ impl CryptoStore for SledStore {
             .collect())
     }
 
+    async fn inbound_group_session_counts(&self) -> Result<RoomKeyCount> {
+        todo!()
+    }
+
+    async fn inbound_group_sessions_for_backup(&self) -> Result<Vec<InboundGroupSession>> {
+        todo!()
+    }
+
     async fn get_outbound_group_sessions(
         &self,
         room_id: &RoomId,
@@ -670,12 +678,12 @@ impl CryptoStore for SledStore {
         !self.users_for_key_query_cache.is_empty()
     }
 
-    fn tracked_users(&self) -> HashSet<UserId> {
-        self.tracked_users_cache.to_owned().iter().map(|u| u.clone()).collect()
-    }
-
     fn users_for_key_query(&self) -> HashSet<UserId> {
         self.users_for_key_query_cache.iter().map(|u| u.clone()).collect()
+    }
+
+    fn tracked_users(&self) -> HashSet<UserId> {
+        self.tracked_users_cache.to_owned().iter().map(|u| u.clone()).collect()
     }
 
     async fn update_tracked_user(&self, user: &UserId, dirty: bool) -> Result<bool> {

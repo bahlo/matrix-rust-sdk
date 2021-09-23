@@ -25,6 +25,7 @@
     unused_qualifications
 )]
 
+pub mod backups;
 mod error;
 mod file_encryption;
 mod gossiping;

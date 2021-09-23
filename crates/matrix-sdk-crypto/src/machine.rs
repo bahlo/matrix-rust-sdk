@@ -45,7 +45,8 @@ use ruma::{
         secret::request::SecretName,
         AnyMessageEventContent, AnyRoomEvent, AnyToDeviceEvent, EventContent,
     },
-    DeviceId, DeviceIdBox, DeviceKeyAlgorithm, EventEncryptionAlgorithm, RoomId, UInt, UserId,
+    DeviceId, DeviceIdBox, DeviceKeyAlgorithm, DeviceKeyId, EventEncryptionAlgorithm, RoomId, UInt,
+    UserId,
 };
 use serde_json::Value;
 use tracing::{debug, error, info, trace, warn};
@@ -1341,6 +1342,52 @@ impl OlmMachine {
         export: CrossSigningKeyExport,
     ) -> Result<CrossSigningStatus, SecretImportError> {
         self.store.import_cross_signing_keys(export).await
+    }
+
+    async fn sign_account(
+        &self,
+        message: &str,
+        signatures: &mut BTreeMap<UserId, BTreeMap<DeviceKeyId, String>>,
+    ) {
+        let device_key_id = DeviceKeyId::from_parts(DeviceKeyAlgorithm::Ed25519, self.device_id());
+        let signature = self.account.sign(message).await;
+
+        signatures.entry(self.user_id().to_owned()).or_default().insert(device_key_id, signature);
+    }
+
+    async fn sign_master(
+        &self,
+        message: &str,
+        signatures: &mut BTreeMap<UserId, BTreeMap<DeviceKeyId, String>>,
+    ) -> Result<(), crate::SignatureError> {
+        let identity = &*self.user_identity.lock().await;
+
+        let master_key: DeviceIdBox = identity
+            .master_public_key()
+            .await
+            .and_then(|m| m.get_first_key().map(|k| k.to_owned()))
+            .ok_or(crate::SignatureError::MissingSigningKey)?
+            .into();
+
+        let device_key_id = DeviceKeyId::from_parts(DeviceKeyAlgorithm::Ed25519, &master_key);
+        let signature = identity.sign(message).await?;
+
+        signatures.entry(self.user_id().to_owned()).or_default().insert(device_key_id, signature);
+
+        Ok(())
+    }
+
+    /// TODO
+    pub async fn sign(&self, message: &str) -> BTreeMap<UserId, BTreeMap<DeviceKeyId, String>> {
+        let mut signatures: BTreeMap<_, BTreeMap<_, _>> = BTreeMap::new();
+
+        self.sign_account(message, &mut signatures).await;
+
+        if let Err(e) = self.sign_master(message, &mut signatures).await {
+            warn!(error =? e, "Couldn't sign the message using the cross signing master key")
+        }
+
+        signatures
     }
 }
 

@@ -137,6 +137,15 @@ impl DeviceChanges {
     }
 }
 
+/// Struct holding info about how many room keys the store has.
+#[derive(Debug, Clone, Default)]
+pub struct RoomKeyCount {
+    /// The total number of room keys the store has.
+    pub total: usize,
+    /// The number of backed up room keys the store has.
+    pub backed_up: usize,
+}
+
 /// A struct containing private cross signing keys that can be backed up or
 /// uploaded to the secret store.
 #[derive(Zeroize)]
@@ -565,6 +574,13 @@ pub trait CryptoStore: AsyncTraitDeps {
 
     /// Get all the inbound group sessions we have stored.
     async fn get_inbound_group_sessions(&self) -> Result<Vec<InboundGroupSession>>;
+
+    /// Get the number inbound group sessions we have and how many of them are
+    /// backed up.
+    async fn inbound_group_session_counts(&self) -> Result<RoomKeyCount>;
+
+    /// Get all the inbound group sessions we have not backed up yet.
+    async fn inbound_group_sessions_for_backup(&self) -> Result<Vec<InboundGroupSession>>;
 
     /// Get the outbound group sessions we have stored that is used for the
     /// given room.
