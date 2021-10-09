@@ -227,6 +227,11 @@ impl InboundGroupSession {
         self.backed_up.load(SeqCst)
     }
 
+    /// Reset the backup state of the inbound group session.
+    pub(crate) fn reset_backup_state(&self) {
+        self.backed_up.store(false, SeqCst)
+    }
+
     /// Get the map of signing keys this session was received from.
     pub fn signing_keys(&self) -> &BTreeMap<DeviceKeyAlgorithm, String> {
         &self.signing_keys
@@ -323,6 +328,7 @@ impl InboundGroupSession {
         self.inner.lock().await.decrypt(message)
     }
 
+    #[cfg(feature = "backups_v1")]
     pub(crate) async fn to_backup(&self) -> BackedUpRoomKey {
         self.export().await.into()
     }
