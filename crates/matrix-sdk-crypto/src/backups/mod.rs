@@ -14,7 +14,10 @@
 
 #![allow(dead_code, missing_docs)]
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use matrix_sdk_common::{locks::RwLock, uuid::Uuid};
 use ruma::{api::client::r0::backup::RoomKeyBackup, RoomId};
@@ -36,12 +39,34 @@ pub struct BackupMachine {
     account: Account,
     store: Store,
     backup_key: Arc<RwLock<Option<MegolmV1BackupKey>>>,
-    pending_backup: Arc<RwLock<Option<OutgoingRequest>>>,
+    pending_backup: Arc<RwLock<Option<PendingBackup>>>,
 }
 
-struct PendingBackup(BTreeMap<RoomId, RoomKeyBackup>);
+#[derive(Debug, Clone)]
+struct PendingBackup {
+    request_id: Uuid,
+    request: KeysBackupRequest,
+    sessions: BTreeMap<RoomId, BTreeMap<String, BTreeSet<String>>>,
+}
+
+impl PendingBackup {
+    fn session_was_part_of_the_backup(&self, session: &InboundGroupSession) -> bool {
+        self.sessions
+            .get(session.room_id())
+            .and_then(|r| r.get(session.sender_key()).map(|s| s.contains(session.session_id())))
+            .unwrap_or(false)
+    }
+}
+
+impl From<PendingBackup> for OutgoingRequest {
+    fn from(b: PendingBackup) -> Self {
+        OutgoingRequest { request_id: b.request_id, request: Arc::new(b.request.into()) }.into()
+    }
+}
 
 impl BackupMachine {
+    const BACKUP_BATCH_SIZE: usize = 100;
+
     pub(crate) fn new(
         account: Account,
         store: Store,
@@ -104,12 +129,12 @@ impl BackupMachine {
     /// TODO
     pub async fn backup(&self) -> Result<Option<OutgoingRequest>, CryptoStoreError> {
         if let Some(request) = &*self.pending_backup.read().await {
-            Ok(Some(request.clone()))
+            Ok(Some(request.clone().into()))
         } else {
             let request = self.backup_helper().await?;
             *self.pending_backup.write().await = request.clone();
 
-            Ok(request)
+            Ok(request.map(|r| r.into()))
         }
     }
 
@@ -120,11 +145,28 @@ impl BackupMachine {
         let mut request = self.pending_backup.write().await;
 
         if let Some(r) = &*request {
-            if *r.request_id() == request_id {
+            if r.request_id == request_id {
+                let sessions: Vec<_> = self
+                    .store
+                    .get_inbound_group_sessions()
+                    .await?
+                    .into_iter()
+                    .filter(|s| r.session_was_part_of_the_backup(s))
+                    .collect();
+
+                for session in &sessions {
+                    session.mark_as_backed_up()
+                }
+
+                debug!(sessions =? r.sessions, "Marking inbound group sessions as backed up",);
+
+                let changes = Changes { inbound_group_sessions: sessions, ..Default::default() };
+                self.store.save_changes(changes).await?;
+
                 *request = None;
             } else {
                 warn!(
-                    expected = r.request_id().to_string().as_str(),
+                    expected = r.request_id.to_string().as_str(),
                     got = request_id.to_string().as_str(),
                     "Tried to mark a pending backup as sent but the request id didn't match"
                 )
@@ -139,18 +181,19 @@ impl BackupMachine {
         Ok(())
     }
 
-    async fn backup_helper(&self) -> Result<Option<OutgoingRequest>, CryptoStoreError> {
+    async fn backup_helper(&self) -> Result<Option<PendingBackup>, CryptoStoreError> {
         if let Some(backup_key) = &*self.backup_key.read().await {
             if let Some(version) = backup_key.backup_version() {
                 let sessions = self.store.inbound_group_sessions_for_backup().await?;
 
                 if !sessions.is_empty() {
                     let key_count = sessions.len();
-                    let backup = Self::backup_keys(sessions, backup_key).await;
+                    let (backup, session_record) = Self::backup_keys(sessions, backup_key).await;
 
-                    let request = OutgoingRequest {
+                    let request = PendingBackup {
                         request_id: Uuid::new_v4(),
-                        request: Arc::new(KeysBackupRequest { version, rooms: backup }.into()),
+                        request: KeysBackupRequest { version, rooms: backup },
+                        sessions: session_record,
                     };
 
                     info!(key_count = key_count, backup_key =? backup_key, "Backed up room keys");
@@ -174,13 +217,24 @@ impl BackupMachine {
     async fn backup_keys(
         sessions: Vec<InboundGroupSession>,
         backup_key: &MegolmV1BackupKey,
-    ) -> BTreeMap<RoomId, RoomKeyBackup> {
+    ) -> (BTreeMap<RoomId, RoomKeyBackup>, BTreeMap<RoomId, BTreeMap<String, BTreeSet<String>>>)
+    {
         let mut backup: BTreeMap<RoomId, RoomKeyBackup> = BTreeMap::new();
+        let mut session_record: BTreeMap<RoomId, BTreeMap<String, BTreeSet<String>>> =
+            BTreeMap::new();
 
-        for session in sessions {
+        for session in sessions.into_iter().take(Self::BACKUP_BATCH_SIZE) {
             let room_id = session.room_id().to_owned();
             let session_id = session.session_id().to_owned();
+            let sender_key = session.sender_key().to_owned();
             let session = backup_key.encrypt(session).await;
+
+            session_record
+                .entry(room_id.clone())
+                .or_default()
+                .entry(sender_key)
+                .or_default()
+                .insert(session_id.clone());
 
             backup
                 .entry(room_id)
@@ -189,7 +243,7 @@ impl BackupMachine {
                 .insert(session_id, session);
         }
 
-        backup
+        (backup, session_record)
     }
 }
 

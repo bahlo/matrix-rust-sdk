@@ -232,6 +232,10 @@ impl InboundGroupSession {
         self.backed_up.store(false, SeqCst)
     }
 
+    pub(crate) fn mark_as_backed_up(&self) {
+        self.backed_up.store(true, SeqCst)
+    }
+
     /// Get the map of signing keys this session was received from.
     pub fn signing_keys(&self) -> &BTreeMap<DeviceKeyAlgorithm, String> {
         &self.signing_keys
